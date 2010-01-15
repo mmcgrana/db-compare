@@ -35,8 +35,6 @@ Databases todo:
 
 Operations todo:
 
- * Find records by index value and filter
- * Update one record
  * Update multiple records
  * Delete single record
  * Delete multiple records
@@ -48,6 +46,8 @@ Other todo:
  * Programatic reporting
  * Request-level statistics
  * Fully automated execution on cloud servers
+ * Make implementations less knowledge of benchmark internals
+ * Move forcing to bench
  
 ## License
 

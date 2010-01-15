@@ -16,7 +16,9 @@
 # mkdir /tmp/mongodb-bench
 # mongod --db-path /tmp/mongodb-bench
 
-HOST=ec2-204-236-243-197.compute-1.amazonaws.com
+# cat /proc/meminfo
+
+HOST=ec2-174-129-111-143.compute-1.amazonaws.com
 USER=root
 KEY=/Users/mmcgrana/.ssh/scratch.pem
 DIR=fleetdb
@@ -25,12 +27,13 @@ set -e
 
 case $1 in
   "setup")
-  ssh -i $KEY $USER@$HOST "yum -y install git-core rlwrap && mkdir -p $DIR"
+  # ssh -i $KEY $USER@$HOST "yum -y install git-core rlwrap && mkdir -p $DIR"
+  # ssh -i $KEY $USER@$HOST "yum -y install git-core rlwrap && mkdir -p $DIR"
   ;;
 
   "sync")
-  rsync -vra --delete --exclude '.git' --rsh 'ssh -i '$KEY ./ $USER@$HOST:$DIR/
-  rsync -a --rsh 'ssh -i '$KEY scratch/clj_ec2 $USER@$HOST:$DIR/clj
+  rsync -ra --delete --exclude '.git' --rsh 'ssh -i '$KEY ./ $USER@$HOST:$DIR/
+  rsync -a --rsh 'ssh -i '$KEY bin/clj.sh $USER@$HOST:$DIR/clj
   ;;
   
   "ssh")

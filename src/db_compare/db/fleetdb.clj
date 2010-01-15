@@ -10,7 +10,7 @@
 (defn- close-client [client]
   (fc/close client))
 
-(defn- setup [client]
+(defn- create-index [client]
   (client
     ["create-index" "records" "birthdate"]))
 
@@ -48,10 +48,18 @@
       {"where" [">=" "birthdate" birthdate]
        "limit" find-multiple-size}]))
 
+(defn- find-filtered [client birthdate rating find-filtered-size]
+  (client
+    ["select" "records"
+      {"where" ["and" [">=" "birthdate" birthdate]
+                      [">" "rating" rating]]
+       "limit" find-filtered-size}]))
+
 (def fleetdb-impl
   {:name "fleetdb"
    :init init :open-client open-client :close-client close-client
    :setup setup :clear clear :ping ping
    :insert-one insert-one :insert-multiple insert-multiple
    :get-one get-one :get-multiple get-multiple
-   :find-one find-one :find-multiple find-multiple})
+   :find-one find-one :find-multiple find-multiple
+   :find-filtered find-filtered})

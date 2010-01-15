@@ -2,6 +2,7 @@
 
 (ns db-compare.bench
   (:use (clojure.contrib [def :only (defmacro- defvar-)])
+        (clojure.contrib [str-utils :only (re-split)])
         (db-compare.db noop tree-map thread-pool-server
                        fleetdb-embedded fleetdb
                        memcached redis h2 mongodb))
@@ -10,19 +11,19 @@
 (defn- nano-time []
   (System/nanoTime))
 
-(defn timed [task]
+(defn- timed [task]
   (let [t-start (nano-time)
         res     (task)
         t-end   (nano-time)]
     (double (/ (- t-end t-start) 1000000000))))
 
-(defn bench [label num-queries task]
+(defn- bench [label num-queries task]
   (let [t (timed task)]
     (printf "%-36s %-8.2f %-8d\n"
       label t (int (/ num-queries t)))
     (flush)))
 
-(defn dothreaded [num-threads #^Runnable subcoll-op]
+(defn- dothreaded [num-threads #^Runnable subcoll-op]
   (let [threads (map (fn [thread-num]
                        (let [rand (Random.)]
                          (Thread. #(subcoll-op thread-num rand))))
@@ -30,11 +31,21 @@
     (doseq [#^Thread thread threads] (.start thread))
     (doseq [#^Thread thread threads] (.join thread))))
 
-(defmacro dorange [[index-name start end step] & body]
+(defmacro- dorange [[index-name start end step] & body]
   `(doseq [~index-name (range ~start ~end ~step)]
      ~@body))
 
-(defn record [#^Random rand id]
+(defn- repeatedly* [n f]
+  (take n (repeatedly f)))
+
+(defn- random-ids [#^Random rand n k]
+  (seq
+    (loop [ids #{}]
+      (if (= k (count ids))
+        ids
+        (recur (conj ids (.nextInt rand n)))))))
+
+(defn- record [#^Random rand id]
   {"id"        id
    "token"     (str (.nextInt rand 1000000) (.nextInt rand 1000000))
    "birthdate" (.nextInt rand 1000000000)
@@ -145,7 +156,42 @@
             (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
               (f client birthdate find-multiple-size))))))))
 
-(defn run [num-records num-pings insert-multiple-size get-one-cycles get-multiple-size find-multiple-size db-impl]
+(defn- find-filtered [records find-filtered-size c db db-impl]
+  (let [f (:find-filtered db-impl)
+        num-records (count records)]
+    (dothreaded c
+      (fn [thread-num #^Random rand]
+        (with-client [client db db-impl]
+          (dotimes [_ (/ num-records c)]
+            (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
+              (f client birthdate 0.5 find-filtered-size))))))))
+
+(defn- update-one [records c db db-impl]
+  (let [f (:update-one db-impl)
+        num-records (count records)]
+    (dothreaded c
+      (fn [thread-num #^Random rand]
+        (with-client [client db db-impl]
+          (dotimes [_ (/ num-records c)]
+            (let [id     (.nextInt rand num-records)
+                  rating (.nextDouble rand)]
+              (f client id rating))))))))
+
+(defn- update-multiple [records update-multiple-size c db db-impl]
+  (let [f (:update-multiple db-impl)
+        num-records (count records)]
+    (dothreaded c
+      (fn [thread-num #^Random rand]
+        (with-client [client db db-impl]
+          (dotimes [_ (/ num-records c)]
+            (let [ids    (random-ids rand num-records update-multiple-size)
+                  rating (.nextDouble rand)]
+              (f client ids rating))))))))
+
+(defn run [db-impl num-trials concurrencies
+           num-records num-pings insert-multiple-size get-one-cycles
+           get-multiple-size find-multiple-size find-filtered-size
+           update-multiple-size]
   (println "db                   " (:name db-impl))
   (println "num-records          " num-records)
   (println "num-pings            " num-pings)
@@ -153,13 +199,14 @@
   (println "get-one-cycles       " get-one-cycles)
   (println "get-multiple-size    " get-multiple-size)
   (println "find-multiple-size   " find-multiple-size)
+  (println "find-filtered-size   " find-filtered-size)
   (let [db   ((:init db-impl))
         rand    (Random.)
         records (vec (map #(record rand %) (range num-records)))]
     (when (:setup db-impl)
       (setup db db-impl))
-    (dotimes [t 2]
-      (doseq [c [1 10 100]]
+    (dotimes [t num-trials]
+      (doseq [c concurrencies]
         (println "~~~ trial" (inc t) "num-threads" c)
         (when (:ping db-impl)
           (bench "ping" num-pings
@@ -187,7 +234,16 @@
             #(find-one records c db db-impl)))
         (when (:find-multiple db-impl)
           (bench "find-multiple" num-records
-            #(find-multiple records find-multiple-size c db db-impl)))))))
+            #(find-multiple records find-multiple-size c db db-impl)))
+        (when (:find-filtered db-impl)
+          (bench "find-filtered" num-records
+            #(find-filtered records find-filtered-size c db db-impl)))
+        (when (:update-one db-impl)
+          (bench "update-one" num-records
+            #(update-one records c db db-impl)))
+        (when (:update-multiple db-impl)
+          (bench "update-multiple" num-records
+            #(update-multiple records update-multiple-size c db db-impl)))))))
 
 (defvar- db-impls
   {:noop               noop-impl
@@ -200,14 +256,21 @@
    :h2                 h2-impl
    :mongodb            mongodb-impl})
 
+(defn- parse-int [s]
+  (Integer/decode s))
+
 (let [args *command-line-args*
       db-impl              (db-impls (keyword (nth args 0)))
-      num-records          (Integer. #^String (nth args 1))
-      num-pings            (Integer. #^String (nth args 2))
-      insert-multiple-size (Integer. #^String (nth args 3))
-      get-one-cycles       (Integer. #^String (nth args 4))
-      get-multiple-size    (Integer. #^String (nth args 5))
-      find-multiple-size   (Integer. #^String (nth args 6))]
-  (run num-records
-       num-pings insert-multiple-size get-one-cycles get-multiple-size find-multiple-size
-       db-impl))
+      num-trials           (parse-int (nth args 1))
+      concurrencies        (let [clist        (nth args 2)]
+                             (map parse-int (re-split #"," clist)))
+      num-records          (parse-int (nth args 3))
+      num-pings            (parse-int (nth args 4))
+      insert-multiple-size (parse-int (nth args 5))
+      get-one-cycles       (parse-int (nth args 6))
+      get-multiple-size    (parse-int (nth args 7))
+      find-multiple-size   (parse-int (nth args 8))
+      find-filtered-size   (parse-int (nth args 9))
+      update-multiple-size (parse-int (nth args 10))]
+  (run db-impl num-trials concurrencies
+       num-records num-pings insert-multiple-size get-one-cycles get-multiple-size find-multiple-size find-filtered-size update-multiple-size))
