@@ -4,7 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.util.concurrent.*;
 
-public class ThreadPoolServer {
+public class PingServer {
   
   private static class ServerHandler implements Runnable {
     private final Socket socket;
@@ -14,8 +14,8 @@ public class ThreadPoolServer {
       try {
         PrintWriter out = new PrintWriter(socket.getOutputStream());
         BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        while (true) {
-          String msg = in.readLine();
+        String msg;
+        while ((msg = in.readLine()) != null) {
           if (msg.equals("ping")) {
             out.println("pong");
             out.flush();
@@ -35,7 +35,7 @@ public class ThreadPoolServer {
   public static void main(String[] args) throws IOException {
     ServerSocket serverSocket = new ServerSocket(4444, 10000);
     ExecutorService executor = Executors.newFixedThreadPool(100);
-    
+    System.out.println("ping server listening on port 4444");
     while (true) {
       executor.execute(new ServerHandler(serverSocket.accept()));
     }

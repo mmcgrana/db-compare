@@ -1,68 +1,62 @@
 (ns db-compare.db.fleetdb-embedded
   (:require (fleetdb [embedded :as fe])))
 
-(defn- init []
-  (fe/init-persistent "/tmp/fleetdb-embedded-bench.fdb"))
+(def fleetdb-embedded-impl {
+  :init
+  (fn []
+    (fe/init-persistent "/tmp/fleetdb-embedded-bench.fdb"))
 
-(defn- open-client [dba]
-  dba)
+  :open-client
+  (fn [dba]
+    dba)
 
-(defn- close-client [dba])
+  :clear-collection
+  (fn [dba coll]
+    (fe/query dba ["delete" coll]))
 
-(defn- setup [dba]
-  (fe/query dba
-    ["create-index" "records" "birthdate"]))
+  :ensure-index
+  (fn [dba coll attr]
+    (fe/query dba ["create-index" coll attr]))
 
-(defn- clear [dba]
-  (fe/query dba
-    ["delete" "records"]))
+  :insert-one
+  (fn [dba coll record]
+    (fe/query dba ["insert" coll record]))
 
-(defn- insert-one [dba record]
-  (fe/query dba
-    ["insert" "records" record]))
+  :insert-multiple
+  (fn [dba coll records]
+    (fe/query dba ["insert" coll records]))
 
-(defn- insert-multiple [dba records]
-  (fe/query dba
-    ["insert" "records" records]))
+  :get-one
+  (fn [dba coll id]
+    (first (fe/query dba ["select" coll {"where" ["=" "id" id]}])))
 
-(defn- get-one [dba id]
-  (first (fe/query dba
-           ["select" "records" {"where" ["=" "id" id]}])))
+  :get-multiple
+  (fn [dba coll ids]
+    (fe/query dba ["select" coll {"where" ["in" "id" ids]}]))
 
-(defn- get-multiple [dba ids]
-  (dorun (fe/query dba
-           ["select" "records" {"where" ["in" "id" ids]}])))
+  :find-one
+  (fn [dba coll attr val]
+    (first (fe/query dba ["select" coll {"where" ["=" attr val]}])))
 
-(defn- find-one [dba birthdate]
-  (first (fe/query dba
-           ["select" "records" {"where" ["=" "birthdate" birthdate]}])))
+  :find-above
+  (fn [dba coll attr val limit]
+    (fe/query dba ["select" coll {"where" [">" attr val] "limit" limit}]))
 
-(defn- find-multiple [dba birthdate find-multiple-size]
-  (dorun (fe/query dba
-           ["select" "records"
-             {"where" [">=" "birthdate" birthdate]
-              "limit" find-multiple-size}])))
+  :find-above2
+  (fn [dba coll attr1 val1 attr2 val2 limit]
+    (fe/query dba ["select" coll {"where" ["and" [">" attr1 val1]
+                                                 [">" attr2 val2]]
+                                  "limit" limit}]))
 
-(defn- find-filtered [dba birthdate rating find-filtered-size]
-  (dorun (fe/query dba
-           ["select" "records"
-             {"where" ["and" [">=" "birthdate" birthdate]
-                             [">" "rating" rating]]
-              "limit" find-filtered-size}])))
+  :update-one
+  (fn [dba coll id attr val]
+    (fe/query dba ["update" coll {attr val} {"where" ["=" "id" id]}]))
 
-(defn- update-one [dba id rating]
-  (fe/query dba
-    ["update" "records" {"rating" rating} {"where" ["=" "id" id]}]))
+  :update-multiple
+  (fn [dba coll ids attr val]
+    (fe/query dba ["update" coll {attr val} {"where" ["in" "id" ids]}]))
 
-(defn- update-multiple [dba ids rating]
-  (fe/query dba
-    ["update" "records" {"rating" rating} {"where" ["in" "id" ids]}]))
-
-(def fleetdb-embedded-impl
-  {:name "fleetdb-embedded"
-   :init init :open-client open-client :close-client close-client
-   :setup setup :clear clear
-   :insert-one insert-one :insert-multiple insert-multiple
-   :get-one get-one :get-multiple get-multiple
-   :find-one find-one :find-multiple find-multiple :find-filtered find-filtered
-   :update-one update-one :update-multiple update-multiple})
+  :delete-one
+  (fn [dba coll id]
+    (fe/query dba ["delete" coll {"where" ["=" "id" id]}]))
+})

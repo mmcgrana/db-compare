@@ -14,4 +14,6 @@
                      [org.clojars.mmcgrana/jredis-core-ri "a.0-SNAPSHOT"]
                      [org.clojars.mmcgrana/mongo "1.2"]
                      [org.clojars.mmcgrana/java-memcached "2.0.1"]
-                     [com.h2database/h2 "1.2.126"]])
+                     [com.h2database/h2 "1.2.126"]
+                     [mysql/mysql-connector-java "5.1.9"]
+                     [postgresql/postgresql "8.4-701.jdbc4"]])

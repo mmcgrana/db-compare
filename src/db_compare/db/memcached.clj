@@ -2,31 +2,58 @@
   (:import (com.danga.MemCached MemCachedClient SockIOPool))
   (:require [clj-json :as json]))
 
-(defn- init []
-  (let [pool (SockIOPool/getInstance)]
-  (.setServers pool (into-array ["localhost:11211"]))
-  (.initialize pool)))
+(def memcached-impl {
+  :init
+  (fn []
+    (let [host "127.0.0.1"
+          port 11211
+          pool (SockIOPool/getInstance)]
+      (.setServers pool (into-array [(str host ":" port)]))
+      (.initialize pool)))
 
-(defn- open-client [_]
-  (MemCachedClient.))
+  :open-client
+  (fn [_]
+    (MemCachedClient.))
 
-(defn- close-client [#^MemCachedClient mcc])
+  :clear-collection
+  (fn [#^MemCachedClient mcc coll]
+    (.flushAll mcc))
 
-(defn- clear [#^MemCachedClient mcc]
-  (.flushAll mcc))
+  :insert-one
+  (fn [#^MemCachedClient mcc coll record]
+    (.set mcc (str coll ":" (record "id"))
+              (json/generate-string record)))
 
-(defn- insert-one [#^MemCachedClient mcc record]
-  (.set mcc (str (record "id")) (json/generate-string record)))
+  :insert-multiple
+  (fn [#^MemCachedClient mcc coll records]
+    (doseq [record records]
+      (.set mcc (str coll ":" (record "id"))
+        (json/generate-string record))))
 
-(defn- get-one [#^MemCachedClient mcc id]
-  (json/parse-string (.get mcc (str id))))
+  :get-one
+  (fn [#^MemCachedClient mcc coll id]
+    (if-let [s (.get mcc (str coll ":" id))]
+      (json/parse-string s)))
 
-(defn- get-multiple [#^MemCachedClient mcc ids]
-  (map json/parse-string
-       (.getMultiArray mcc (into-array String (map str ids)))))
+  :get-multiple
+  (fn [#^MemCachedClient mcc coll ids]
+    (map json/parse-string
+         (.getMultiArray mcc (into-array String (map #(str coll ":" %) ids)))))
 
-(def memcached-impl
-  {:name "memcached"
-   :init init :open-client open-client :close-client close-client
-   :clear clear :insert-one insert-one
-   :get-one get-one :get-multiple get-multiple})
+  :update-one
+  (fn [#^MemCachedClient mcc coll id attr val]
+    (let [r1 (json/parse-string (.get mcc (str coll ":" id)))
+          r2 (assoc r1 attr val)]
+      (.set mcc (str coll ":" id) (json/generate-string r2))))
+
+  :update-multiple
+  (fn [#^MemCachedClient mcc coll ids attr val]
+    (doseq [id ids]
+      (let [r1 (json/parse-string (.get mcc (str coll ":" id)))
+            r2 (assoc r1 attr val)]
+        (.set mcc (str coll ":" id) (json/generate-string r2)))))
+
+  :delete-one
+  (fn [#^MemCachedClient mcc coll id]
+    (.delete mcc (str coll ":" id)))
+})

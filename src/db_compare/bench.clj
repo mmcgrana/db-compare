@@ -3,10 +3,17 @@
 (ns db-compare.bench
   (:use (clojure.contrib [def :only (defmacro- defvar-)])
         (clojure.contrib [str-utils :only (re-split)])
-        (db-compare.db noop tree-map thread-pool-server
-                       fleetdb-embedded fleetdb
-                       memcached redis h2 mongodb))
+        (db-compare.db concurrent-hash-map fleetdb-embedded fleetdb-server
+                       h2 memcached mongodb mysql null-store ping-server
+                       postgresql redis))
   (:import (java.util Random)))
+
+(defn- record [#^Random rand id]
+  {"id"        id
+   "token"     (str (.nextInt rand 1000000) (.nextInt rand 1000000))
+   "birthdate" (.nextInt rand 1000000000)
+   "rating"    (.nextDouble rand)
+   "admin"     (.nextBoolean rand)})
 
 (defn- nano-time []
   (System/nanoTime))
@@ -17,12 +24,6 @@
         t-end   (nano-time)]
     (double (/ (- t-end t-start) 1000000000))))
 
-(defn- bench [label num-queries task]
-  (let [t (timed task)]
-    (printf "%-36s %-8.2f %-8d\n"
-      label t (int (/ num-queries t)))
-    (flush)))
-
 (defn- dothreaded [num-threads #^Runnable subcoll-op]
   (let [threads (map (fn [thread-num]
                        (let [rand (Random.)]
@@ -31,12 +32,9 @@
     (doseq [#^Thread thread threads] (.start thread))
     (doseq [#^Thread thread threads] (.join thread))))
 
-(defmacro- dorange [[index-name start end step] & body]
+(defmacro- dorange [[index-name [start end step]] & body]
   `(doseq [~index-name (range ~start ~end ~step)]
      ~@body))
-
-(defn- repeatedly* [n f]
-  (take n (repeatedly f)))
 
 (defn- random-ids [#^Random rand n k]
   (seq
@@ -45,232 +43,202 @@
         ids
         (recur (conj ids (.nextInt rand n)))))))
 
-(defn- record [#^Random rand id]
-  {"id"        id
-   "token"     (str (.nextInt rand 1000000) (.nextInt rand 1000000))
-   "birthdate" (.nextInt rand 1000000000)
-   "rating"    (.nextDouble rand)
-   "admin"     (.nextBoolean rand)})
-
 (defmacro- with-client [[client-name db db-impl] & body]
   `(let [~client-name ((:open-client ~db-impl) ~db)]
      (try
        ~@body
        (finally
-         ((:close-client ~db-impl) ~client-name)))))
+         (if-let [closer# (:close-client ~db-impl)]
+           (closer# ~client-name))))))
 
-(defn- setup [db db-impl]
-  (with-client [client db db-impl]
-    ((:setup db-impl) client)))
+(defmacro dothreaded-client [[[client-sym cnum-sym rand-sym] [db db-impl conc]] body]
+  `(dothreaded ~conc
+     (fn [~cnum-sym ~rand-sym]
+       (with-client [~client-sym ~db ~db-impl]
+         ~body))))
 
-(defn- clear [db db-impl]
-  (with-client [client db db-impl]
-    ((:clear db-impl) client)))
+(defmacro- report [label num-queries body]
+  `(let [t# (timed (fn [] ~body))]
+     (printf "%-36s %-8.2f %-8d\n" ~label t# (int (/ ~num-queries t#)))
+     (flush)))
 
-(defn- ping [num-pings c db db-impl]
-  (let [f (:ping db-impl)]
-    (dothreaded c
-      (fn [thread-num _]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-pings c)]
-            (f client)))))))
+(defmacro- report-if-let [bind-form label num-queries body]
+  `(if-let ~bind-form
+     (report ~label ~num-queries ~body)))
 
-(defn- insert-one [records c db db-impl]
-  (let [f (:insert-one db-impl)]
-    (dothreaded c
-      (fn [thread-num _]
-        (with-client [client db db-impl]
-          (dorange [i thread-num (count records) c]
-            (let [record (records i)]
-              (f client record))))))))
+(defn- ensure-collection [db db-impl]
+  (if-let [f (:ensure-collection db-impl)]
+    (with-client [client db db-impl]
+      (f client "records"))))
 
-(defn- insert-multiple [records insert-size c db db-impl]
-  (let [f (:insert-multiple db-impl)]
-    (dothreaded c
-      (fn [thread-num _]
-        (with-client [client db db-impl]
-          (dorange [i (* thread-num insert-size) (count records) (* c insert-size)]
-            (let [insert-records (subvec records i (+ i insert-size))]
-              (f client insert-records))))))))
+(defn- ensure-index [db db-impl]
+  (when-let [f (:ensure-index db-impl)]
+    (with-client [client db db-impl]
+      (f client "records" "birthdate"))))
 
-(defn- get-one-sequential [records get-one-cycles c db db-impl]
-  (let [f (:get-one db-impl)]
-    (dothreaded c
-      (fn [thread-num _]
-        (with-client [client db db-impl]
-          (dotimes [_ get-one-cycles]
-            (dorange [i thread-num (count records) c]
-              (let [id i]
-                (f client id)))))))))
+(defn- clear-collection [db db-impl]
+  (if-let [f (:clear-collection db-impl)]
+    (with-client [client db db-impl]
+      (f client "records"))))
 
-(defn- get-one-random [records get-one-cycles c db db-impl]
-  (let [f (:get-one db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ get-one-cycles]
-            (dotimes [_ (/ num-records c)]
-              (let [id (.nextInt rand num-records)]
-                (f client id)))))))))
+(defn- ping [db db-impl conc num-pings]
+  (report-if-let [f (:ping db-impl)] "ping" num-pings
+    (let [num-pings-per (/ num-pings conc)]
+      (dothreaded-client [[client _ _] [db db-impl conc]]
+        (dotimes [_ num-pings-per]
+          (f client))))))
 
-(defn- get-multiple-sequential [records get-multiple-size c db db-impl]
-  (let [f (:get-multiple db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num _]
-        (with-client [client db db-impl]
-          (dorange [i thread-num num-records c]
-            (let [ids (map #(% "id")
-                           (subvec records i (min (+ i get-multiple-size) num-records)))]
-              (f client ids))))))))
+(defn- insert-one [db db-impl records num-records conc]
+  (when-let [f (:insert-one db-impl)]
+    (clear-collection db db-impl)
+    (report "insert-one" num-records
+      (dothreaded-client [[client cnum _] [db db-impl conc]]
+        (dorange [i [cnum num-records conc]]
+          (let [record (records i)]
+            (f client "records" record)))))))
 
-(defn- get-multiple-random [records get-multiple-size c db db-impl]
-  (let [f (:get-multiple db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [ids (take get-multiple-size
-                        (repeatedly #(.nextInt rand num-records)))]
-              (f client ids))))))))
+(defn- insert-multiple [db db-impl records num-records conc size-insert-multiple]
+  (when-let [f (:insert-multiple db-impl)]
+    (clear-collection db db-impl)
+    (report "insert-multiple" (/ num-records size-insert-multiple)
+      (dothreaded-client [[client cnum _] [db db-impl conc]]
+        (dorange [i [(* cnum size-insert-multiple) num-records (* conc size-insert-multiple)]]
+          (let [insert-records (subvec records i (+ i size-insert-multiple))]
+            (f client "records" insert-records)))))))
 
-(defn- find-one [records c db db-impl]
-  (let [f (:find-one db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
-              (f client birthdate))))))))
+(defn- get-one-sequential [db db-impl records num-records conc num-get-one]
+  (report-if-let [f (:get-one db-impl)] "get-one" num-get-one
+    (let [num-gets-per (/ num-get-one conc)]
+      (dothreaded-client [[client cnum rand] [db db-impl conc]]
+        (dotimes [i num-gets-per]
+          (let [id (rem (+ cnum (* i conc)) num-records)]
+            (f client "records" id)))))))
 
-(defn- find-multiple [records find-multiple-size c db db-impl]
-  (let [f (:find-multiple db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
-              (f client birthdate find-multiple-size))))))))
+(defn- get-one-random [db db-impl records num-records conc num-get-one]
+  (report-if-let [f (:get-one db-impl)] "get-one" num-get-one
+    (let [num-gets-per (/ num-get-one conc)]
+      (dothreaded-client [[client cnum rand] [db db-impl conc]]
+        (dotimes [_ num-gets-per]
+          (let [id (.nextInt #^Random rand num-records)]
+            (f client "records" id)))))))
 
-(defn- find-filtered [records find-filtered-size c db db-impl]
-  (let [f (:find-filtered db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
-              (f client birthdate 0.5 find-filtered-size))))))))
+(defn- get-multiple-sequential [db db-impl records num-records conc num-get-multiple size-get-multiple]
+  (report-if-let [f (:get-multiple db-impl)] "get-multiple-sequential" num-get-multiple
+    (let [num-gets-per (/ num-get-multiple conc)]
+      (dothreaded-client [[client cnum _] [db db-impl conc]]
+        (dotimes [i num-gets-per]
+          (let [start (+ cnum (* i conc))
+                ids (map #(rem % num-records) (range start (+ start size-get-multiple)))]
+            (f client "records" ids)))))))
 
-(defn- update-one [records c db db-impl]
-  (let [f (:update-one db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [id     (.nextInt rand num-records)
-                  rating (.nextDouble rand)]
-              (f client id rating))))))))
+(defn- get-multiple-random [db db-impl records num-records conc num-get-multiple size-get-multiple]
+  (report-if-let [f (:get-multiple db-impl)] "get-multiple" num-get-multiple
+    (let [num-gets-per (/ num-get-multiple conc)]
+      (dothreaded-client [[client cnum rand] [db db-impl conc]]
+        (dotimes [i num-gets-per]
+          (let [ids (random-ids rand num-records size-get-multiple)]
+            (f client "records" ids)))))))
 
-(defn- update-multiple [records update-multiple-size c db db-impl]
-  (let [f (:update-multiple db-impl)
-        num-records (count records)]
-    (dothreaded c
-      (fn [thread-num #^Random rand]
-        (with-client [client db db-impl]
-          (dotimes [_ (/ num-records c)]
-            (let [ids    (random-ids rand num-records update-multiple-size)
-                  rating (.nextDouble rand)]
-              (f client ids rating))))))))
+(defn- find-one [db db-impl records num-records conc num-find-one]
+  (report-if-let [f (:find-one db-impl)] "find-one" num-find-one
+    (let [num-finds-per (/ num-find-one conc)]
+      (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+        (dotimes [_ num-finds-per]
+          (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
+            (f client "records" "birthdate" birthdate)))))))
 
-(defn run [db-impl num-trials concurrencies
-           num-records num-pings insert-multiple-size get-one-cycles
-           get-multiple-size find-multiple-size find-filtered-size
-           update-multiple-size]
-  (println "db                   " (:name db-impl))
-  (println "num-records          " num-records)
-  (println "num-pings            " num-pings)
-  (println "insert-multiple-size " insert-multiple-size)
-  (println "get-one-cycles       " get-one-cycles)
-  (println "get-multiple-size    " get-multiple-size)
-  (println "find-multiple-size   " find-multiple-size)
-  (println "find-filtered-size   " find-filtered-size)
-  (let [db   ((:init db-impl))
-        rand    (Random.)
-        records (vec (map #(record rand %) (range num-records)))]
-    (when (:setup db-impl)
-      (setup db db-impl))
-    (dotimes [t num-trials]
-      (doseq [c concurrencies]
-        (println "~~~ trial" (inc t) "num-threads" c)
-        (when (:ping db-impl)
-          (bench "ping" num-pings
-            #(ping num-pings c db db-impl)))
-        (when (:insert-one db-impl)
-          (clear db db-impl)
-          (bench "insert-one" num-records
-            #(insert-one records c db db-impl)))
-        (when (:insert-multiple db-impl)
-          (clear db db-impl)
-          (bench "insert-multiple" (/ num-records insert-multiple-size)
-            #(insert-multiple records insert-multiple-size c db db-impl)))
-        (when (:get-one db-impl)
-          (bench "get-one-sequential" (* num-records get-one-cycles)
-            #(get-one-sequential records get-one-cycles c db db-impl))
-          (bench "get-one-random" (* num-records get-one-cycles)
-            #(get-one-random records get-one-cycles c db db-impl)))
-        (when (:get-multiple db-impl)
-          (bench "get-multiple-sequential" num-records
-            #(get-multiple-sequential records get-multiple-size c db db-impl))
-          (bench "get-multiple-random" num-records
-            #(get-multiple-random records get-multiple-size c db db-impl)))
-        (when (:find-one db-impl)
-          (bench "find-one" num-records
-            #(find-one records c db db-impl)))
-        (when (:find-multiple db-impl)
-          (bench "find-multiple" num-records
-            #(find-multiple records find-multiple-size c db db-impl)))
-        (when (:find-filtered db-impl)
-          (bench "find-filtered" num-records
-            #(find-filtered records find-filtered-size c db db-impl)))
-        (when (:update-one db-impl)
-          (bench "update-one" num-records
-            #(update-one records c db db-impl)))
-        (when (:update-multiple db-impl)
-          (bench "update-multiple" num-records
-            #(update-multiple records update-multiple-size c db db-impl)))))))
+(defn- find-above [db db-impl records num-records conc num-find-above size-find-above]
+  (report-if-let [f (:find-above db-impl)] "find-above" num-find-above
+    (let [num-finds-per (/ num-find-above conc)]
+      (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+        (dotimes [_ num-finds-per]
+          (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
+            (f client "records" "birthdate" birthdate size-find-above)))))))
 
-(defvar- db-impls
-  {:noop               noop-impl
-   :tree-map           tree-map-impl
-   :thread-pool-server thread-pool-server-impl
-   :fleetdb-embedded   fleetdb-embedded-impl
-   :fleetdb            fleetdb-impl
-   :memcached          memcached-impl
-   :redis              redis-impl
-   :h2                 h2-impl
-   :mongodb            mongodb-impl})
+(defn- find-above2 [db db-impl records num-records conc num-find-above size-find-above]
+  (report-if-let [f (:find-above2 db-impl)] "find-above2" num-find-above
+    (let [num-finds-per (/ num-find-above conc)]
+      (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+        (dotimes [_ num-finds-per]
+          (let [birthdate ((records (.nextInt rand num-records)) "birthdate")]
+            (f client "records" "birthdate" birthdate "rating" 0.8 size-find-above)))))))
 
-(defn- parse-int [s]
-  (Integer/decode s))
+(defn- update-one [db db-impl records num-records conc num-update-one]
+  (report-if-let [f (:update-one db-impl)] "update-one" num-update-one
+    (let [num-updates-per (/ num-update-one conc)]
+      (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+        (dotimes [_ num-updates-per]
+          (let [id     (.nextInt rand num-records)
+                rating (.nextDouble rand)]
+            (f client "records" id "rating" rating)))))))
 
-(let [args *command-line-args*
-      db-impl              (db-impls (keyword (nth args 0)))
-      num-trials           (parse-int (nth args 1))
-      concurrencies        (let [clist        (nth args 2)]
-                             (map parse-int (re-split #"," clist)))
-      num-records          (parse-int (nth args 3))
-      num-pings            (parse-int (nth args 4))
-      insert-multiple-size (parse-int (nth args 5))
-      get-one-cycles       (parse-int (nth args 6))
-      get-multiple-size    (parse-int (nth args 7))
-      find-multiple-size   (parse-int (nth args 8))
-      find-filtered-size   (parse-int (nth args 9))
-      update-multiple-size (parse-int (nth args 10))]
-  (run db-impl num-trials concurrencies
-       num-records num-pings insert-multiple-size get-one-cycles get-multiple-size find-multiple-size find-filtered-size update-multiple-size))
+(defn- update-multiple [db db-impl records num-records conc num-update-multiple size-update-multiple]
+  (report-if-let [f (:update-multiple db-impl)] "update-multiple" num-update-multiple
+    (let [num-updates-per (/ num-update-multiple conc)]
+      (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+        (dotimes [_ num-updates-per]
+          (let [ids    (random-ids rand num-records size-update-multiple)
+                rating (.nextDouble rand)]
+            (f client "records" ids "rating" rating)))))))
+
+(defn- mixed [db db-impl records num-records conc num-mixed]
+  (let [g (:get-one db-impl)
+        d (:delete-one db-impl)
+        i (:insert-one db-impl)]
+    (if (and g d i)
+      (let [num-mixed-sets-per (/ num-mixed conc 10)]
+        (report "mixed" num-mixed
+          (dothreaded-client [[client cnum #^Random rand] [db db-impl conc]]
+            (dotimes [_ num-mixed-sets-per]
+              (dotimes [_ 8]
+                (let [id (.nextInt rand num-records)]
+                  (g client "records" id)))
+              (let [id  (.nextInt rand num-records)
+                    rec (record rand id)]
+                (d client "records" id)
+                (i client "records" rec)))))))))
+
+(defn db-impl-for [db-type]
+  (db-type
+     {:concurrent-hash-map concurrent-hash-map-impl
+      :fleetdb-embedded    fleetdb-embedded-impl
+      :fleetdb-server      fleetdb-server-impl
+      :fleetdb-embedded    fleetdb-embedded-impl
+      :h2                  h2-impl
+      :memcached           memcached-impl
+      :mongodb             mongodb-impl
+      :mysql               mysql-impl
+      :null-store          null-store-impl
+      :ping-server         ping-server-impl
+      :postgresql          postgresql-impl
+      :redis               redis-impl}))
+
+(defn run [{:keys [db-type num-trials concurrencies num-records num-ping
+                   size-insert-multiple num-get-one num-get-multiple
+                   size-get-multiple num-find-one num-find-above
+                   size-find-above num-update-one num-update-multiple
+                   size-update-multiple num-mixed]}]
+  (let [db-impl (db-impl-for db-type)
+        db      ((:init db-impl))
+        records (let [rand (Random.)]
+                  (vec (map #(record rand %) (range num-records))))]
+    (ensure-collection db db-impl)
+    (ensure-index db db-impl)
+    (dotimes [trial num-trials]
+      (doseq [conc concurrencies]
+        (println "\n~~~ trial" (inc trial) "conc" conc)
+        (ping                    db db-impl                     conc num-ping)
+        (insert-one              db db-impl records num-records conc)
+        (insert-multiple         db db-impl records num-records conc size-insert-multiple)
+        (get-one-sequential      db db-impl records num-records conc num-get-one)
+        (get-one-random          db db-impl records num-records conc num-get-one)
+        (get-multiple-sequential db db-impl records num-records conc num-get-multiple size-get-multiple)
+        (get-multiple-random     db db-impl records num-records conc num-get-multiple size-get-multiple)
+        (find-one                db db-impl records num-records conc num-find-one)
+        (find-above              db db-impl records num-records conc num-find-above size-find-above)
+        (find-above2             db db-impl records num-records conc num-find-above size-find-above)
+        (update-one              db db-impl records num-records conc num-update-one)
+        (update-multiple         db db-impl records num-records conc num-update-multiple size-update-multiple)
+        (mixed                   db db-impl records num-records conc num-mixed)))))
+
+(run (-> (first *command-line-args*) slurp read-string eval))

@@ -1,22 +1,24 @@
 # ami-6d1df904
 # c1.xlarge
 
-# javac -d classes bench/fleetdb/bench/ThreadPoolServer.java 
-# java -server -cp classes fleetdb.bench.ThreadPoolServer
+# javac -d classes src/db_compare/db/PingServer.java 
+# java -server -cp classes db_compare.db.PingServer
 
 # java -server -Xmx6g -cp fleetdb-standalone.jar fleetdb.server -f /tmp/fleetdb-bench.fdb
 
 # redis-server
 
 # mkdir /tmp/h2-bench
-# java -server -Xmx6g -cp lib/h2-1.2.126.jar org.h2.tools.Server -tcp -baseDir /tmp/h2-bench -tcpAllowOthers
+# java -server -Xmx2g -cp lib/h2-1.2.126.jar org.h2.tools.Server -tcp -baseDir /tmp/h2-bench -tcpAllowOthers
 
 # memcached
 
 # mkdir /tmp/mongodb-bench
-# mongod --db-path /tmp/mongodb-bench
+# mongod --dbpath /tmp/mongodb-bench
 
 # cat /proc/meminfo
+
+# mysql start and ensure database?
 
 HOST=ec2-174-129-111-143.compute-1.amazonaws.com
 USER=root

@@ -1,64 +1,99 @@
 (ns db-compare.db.mongodb
+  (:use (clojure.contrib [def :only (defmacro-)]))
   (:import (com.mongodb Mongo DB DBCollection BasicDBObject DBObject DBCursor)
            (java.util List)))
 
-(defn- init []
-  (let [host "127.0.0.1"
-        port 27017]
-    (Mongo. host port)))
-
-(defn- open-client [#^Mongo mongo]
-  (doto (.getDB mongo "benchdb")
-    (.requestStart)))
-
-(defn- close-client [#^DB db]
-  (.requestDone db))
-
-(defn- setup [#^DB db]
-  (-> db (.getCollection "benchcoll")
-    (.ensureIndex (BasicDBObject. "birthdate" 1))))
-
-(defn- clear [#^DB db]
-  (-> db (.getCollection "benchcoll")
-    (.remove (BasicDBObject.))))
+(defmacro- to-coll [db-sym coll-sym & chain]
+  `(-> ~db-sym (.getCollection ~coll-sym)
+     ~@chain))
 
 (defn- db-obj [#^IPersistentMap record]
   (let [id (record "id")]
     (BasicDBObject. (assoc (dissoc record "id") "_id" id))))
 
-(defn- insert-one [#^DB db record]
-  (-> db (.getCollection "benchcoll")
-    (.insert #^DBObject (db-obj record))))
+(def mongodb-impl {
+  :init
+  (fn []
+    (let [host "127.0.0.1"
+          port 27017]
+      (Mongo. host port)))
 
-(defn- insert-multiple [#^DB db records]
-  (-> db (.getCollection "benchcoll")
-    (.insert #^List (map db-obj records))))
+  :open-client
+  (fn [#^Mongo mongo]
+    (doto (.getDB mongo "benchdb")
+      (.requestStart)))
 
-(defn- get-one [#^DB db id]
-  (-> db (.getCollection "benchcoll")
-    (.findOne (BasicDBObject. "_id" id))))
+  :close-client
+  (fn [#^DB db]
+    (.requestDone db))
 
-(defn- get-multiple [#^DB db ids]
-  (-> db (.getCollection "benchcoll")
-    (.find (BasicDBObject. "_id"
-             (BasicDBObject. "$in" (into-array ids))))
-    (.toArray)))
+  :clear-collection
+  (fn [#^DB db coll]
+    (to-coll db coll
+      (.drop)))
 
-(defn- find-one [#^DB db birthdate]
-  (-> db (.getCollection "benchcoll")
-    (.findOne (BasicDBObject. "birthdate" birthdate))))
+  :ensure-index
+  (fn [#^DB db coll attr]
+    (to-coll db coll
+      (.ensureIndex (BasicDBObject. attr 1))))
 
-(defn- find-multiple [#^DB db birthdate find-multiple-size]
-  (-> db (.getCollection "benchcoll")
-    (.find (BasicDBObject. "birthdate" birthdate))
-    (.limit find-multiple-size)
-    (.toArray)))
+  :insert-one
+  (fn [#^DB db coll record]
+    (to-coll db coll
+      (.insert #^DBObject (db-obj record))))
 
-(def mongodb-impl
-  {:name "mongodb"
-   :init init :open-client open-client :close-client close-client
-   :setup setup :clear clear
-   ;:insert-one insert-one :insert-multiple insert-multiple
-   :insert-multiple insert-multiple
-   :get-one get-one :get-multiple get-multiple
-   :find-one find-one :find-multiple find-multiple})
+  :insert-multiple
+  (fn [#^DB db coll records]
+    (to-coll db coll
+      (.insert #^List (map db-obj records))))
+
+  :get-one
+  (fn [#^DB db coll id]
+    (to-coll db coll
+      (.findOne (BasicDBObject. "_id" id))))
+
+  :get-multiple
+  (fn [#^DB db coll ids]
+    (to-coll db coll
+      (.find (BasicDBObject. "_id"
+               (BasicDBObject. "$in" (into-array ids))))))
+
+  :find-one
+  (fn [#^DB db coll attr value]
+    (to-coll db coll
+      (.findOne (BasicDBObject. attr value))))
+
+  :find-above
+  (fn [#^DB db coll attr val limit]
+    (to-coll db coll
+      (.find (BasicDBObject. attr (BasicDBObject. "$gt" val)))
+      (.limit limit)))
+
+  :find-above2
+  (fn [#^DB db coll attr1 val1 attr2 val2 limit]
+    (let [con (-> (BasicDBObject.)
+                (.append attr1 (BasicDBObject. "$gt" val1))
+                (.append attr2 (BasicDBObject. "$gt" val2)))]
+      (to-coll db coll
+        (.find con)
+        (.limit limit))))
+
+  :update-one
+  (fn [#^DB db coll id attr val]
+    (to-coll db coll
+      (.update (BasicDBObject. "_id" id)
+               (BasicDBObject. "$set" (BasicDBObject. attr val))
+               false false)))
+
+  :update-multiple
+  (fn [#^DB db coll ids attr val]
+    (to-coll db coll
+      (.update (BasicDBObject. "$in"  (BasicDBObject."_id" ids))
+               (BasicDBObject. "$set" (BasicDBObject. attr val))
+               false true)))
+
+  :delete-one
+  (fn [#^DB db coll id]
+    (to-coll db coll
+      (.remove (BasicDBObject. "_id" id))))
+})

@@ -12,8 +12,13 @@ Databases implemented:
  * Redis
  * MongoDB
  * FleetDB embedded
- * FleetDB
+ * FleetDB server
  * H2
+ * MySQL
+ * PostgreSQL
+ * Ping server
+ * Concurrent hash map
+ * Null store
 
 Operations implemented:
 
@@ -24,21 +29,16 @@ Operations implemented:
  * Get multiple records by ids, sequentially and randomly
  * Find record by indexed value
  * Find multiple records by indexed value
-
+ * Find multiple records by indexed and unindexed values
+ * Update records one-by-one
+ * Update records in bulk
+ * Read/write mixed
+ 
 Databases todo:
 
- * MySQL
- * PostgreSQL
  * Berkeley DB Java Edition
  * CouchDB
  * Tokyo Tyrant
-
-Operations todo:
-
- * Update multiple records
- * Delete single record
- * Delete multiple records
- * Concurrent read/write mix
 
 Other todo:
 
@@ -46,8 +46,6 @@ Other todo:
  * Programatic reporting
  * Request-level statistics
  * Fully automated execution on cloud servers
- * Make implementations less knowledge of benchmark internals
- * Move forcing to bench
  
 ## License
 
